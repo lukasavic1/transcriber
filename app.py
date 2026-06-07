@@ -79,7 +79,7 @@ def extract_audio_from_youtube(youtube_url: str) -> str:
     """Download audio from YouTube video and return path to MP3 file."""
     try:
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -88,18 +88,25 @@ def extract_audio_from_youtube(youtube_url: str) -> str:
             'outtmpl': str(AUDIO_DIR / '%(id)s'),
             'quiet': False,
             'no_warnings': False,
-            'socket_timeout': 30,
+            'socket_timeout': 60,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': 'https://www.youtube.com/',
             },
             'extractor_args': {
                 'youtube': {
-                    'skip': ['hls', 'dash'],
-                    'lang': ['en'],
+                    'player_client': ['web'],
+                    'player_skip': ['js', 'configs'],
                 }
             },
-            'retries': 3,
-            'fragment_retries': 3,
+            'retries': 10,
+            'fragment_retries': 10,
+            'skip_unavailable_fragments': True,
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -107,7 +114,7 @@ def extract_audio_from_youtube(youtube_url: str) -> str:
             audio_file = AUDIO_DIR / f"{info['id']}.mp3"
 
             if not audio_file.exists():
-                raise FileNotFoundError(f"Audio file not created: {audio_file}")
+                raise FileNotFoundError(f"Audio file not created")
 
             return str(audio_file)
     except Exception as e:
