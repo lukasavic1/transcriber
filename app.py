@@ -318,8 +318,32 @@ def get_user():
 
 
 
-# Track chunked upload sessions
-upload_sessions = {}
+import json
+
+def get_session_meta_path(session_id: str) -> str:
+    """Get path to session metadata file."""
+    return os.path.join(UPLOAD_FOLDER, f".session_{session_id}.json")
+
+def save_session_meta(session_id: str, meta: dict):
+    """Save session metadata to file (persists across Vercel invocations)."""
+    try:
+        with open(get_session_meta_path(session_id), 'w') as f:
+            json.dump(meta, f)
+    except Exception as e:
+        print(f"⚠️  Failed to save session metadata: {e}")
+
+def load_session_meta(session_id: str) -> dict:
+    """Load session metadata from file."""
+    try:
+        meta_path = get_session_meta_path(session_id)
+        if os.path.exists(meta_path):
+            with open(meta_path, 'r') as f:
+                meta = json.load(f)
+                meta['received_chunks'] = set(meta.get('received_chunks', []))
+                return meta
+    except Exception as e:
+        print(f"⚠️  Failed to load session metadata: {e}")
+    return None
 
 
 @app.route('/api/upload-session', methods=['POST'])
@@ -343,13 +367,16 @@ def create_upload_session():
         session_dir = os.path.join(UPLOAD_FOLDER, session_id)
         os.makedirs(session_dir, exist_ok=True)
 
-        upload_sessions[session_id] = {
+        # Save session metadata to file (persists across Vercel invocations)
+        session_meta = {
             'filename': filename,
             'size': file_size,
             'total_chunks': total_chunks,
-            'received_chunks': set(),
-            'session_dir': session_dir
+            'received_chunks': [],
+            'session_dir': session_dir,
+            'created_at': time.time()
         }
+        save_session_meta(session_id, session_meta)
 
         print(f"📝 Filename: {filename}")
         print(f"📊 Size: {file_size / (1024*1024):.2f}MB in {total_chunks} chunks")
@@ -372,19 +399,26 @@ def upload_chunk():
         chunk_num = int(request.form.get('chunk_number', 0))
         total_chunks = int(request.form.get('total_chunks', 0))
 
-        if session_id not in upload_sessions:
+        # Load session from file (works across Vercel invocations)
+        session = load_session_meta(session_id)
+        if not session:
+            print(f"❌ Session not found: {session_id}")
             return jsonify({'error': 'Invalid session'}), 400
 
         if 'chunk' not in request.files:
             return jsonify({'error': 'No chunk data'}), 400
 
         chunk = request.files['chunk']
-        session = upload_sessions[session_id]
+        session_dir = session['session_dir']
 
-        # Save chunk to session directory
-        chunk_path = os.path.join(session['session_dir'], f"chunk_{chunk_num:05d}")
+        # Save chunk
+        chunk_path = os.path.join(session_dir, f"chunk_{chunk_num:05d}")
         chunk.save(chunk_path)
-        session['received_chunks'].add(chunk_num)
+
+        # Update session metadata
+        if chunk_num not in session['received_chunks']:
+            session['received_chunks'].append(chunk_num)
+            save_session_meta(session_id, session)
 
         chunk_size_mb = os.path.getsize(chunk_path) / (1024*1024)
         print(f"✅ Chunk {chunk_num}/{total_chunks} ({chunk_size_mb:.2f}MB)")
@@ -401,13 +435,16 @@ def assemble_and_upload_chunks(session_id: str) -> str:
     try:
         print(f"🔗 [CHUNKS] Assembling session {session_id}...")
 
-        if session_id not in upload_sessions:
+        # Load session from file
+        session = load_session_meta(session_id)
+        if not session:
             raise Exception("Session not found")
 
-        session = upload_sessions[session_id]
         session_dir = session['session_dir']
         total_chunks = session['total_chunks']
         filename = session['filename']
+
+        print(f"📊 Expected {total_chunks} chunks, received {len(session['received_chunks'])}")
 
         # Assemble file from chunks
         final_path = os.path.join(UPLOAD_FOLDER, f"assembled_{int(time.time())}_{secure_filename(filename)}")
@@ -424,14 +461,13 @@ def assemble_and_upload_chunks(session_id: str) -> str:
         final_size = os.path.getsize(final_path)
         print(f"✅ Assembled: {final_size / (1024*1024):.2f}MB")
 
-        # Cleanup chunks
+        # Cleanup chunks and session metadata
         try:
             import shutil
             shutil.rmtree(session_dir)
+            os.remove(get_session_meta_path(session_id))
         except:
             pass
-
-        del upload_sessions[session_id]
 
         # Upload to Vercel Blob if token is available
         if BLOB_READ_WRITE_TOKEN and IS_VERCEL:
