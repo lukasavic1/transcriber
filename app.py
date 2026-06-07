@@ -318,6 +318,146 @@ def get_user():
 
 
 
+# Store for tracking chunked uploads
+upload_sessions = {}
+
+
+@app.route('/api/upload-session', methods=['POST'])
+@login_required
+def create_upload_session():
+    """Create a session for chunked file upload."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"📋 [UPLOAD] Creating chunked upload session...")
+        print(f"{'='*60}")
+
+        data = request.get_json()
+        filename = data.get('filename', '').strip()
+        file_size = data.get('size', 0)
+        total_chunks = data.get('chunks', 0)
+
+        if not filename or not allowed_file(filename):
+            print(f"❌ Invalid filename: {filename}")
+            return jsonify({'error': 'Invalid file'}), 400
+
+        # Create session ID
+        session_id = f"{int(time.time())}_{os.urandom(8).hex()}"
+
+        # Create session directory
+        session_dir = os.path.join(UPLOAD_FOLDER, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+
+        # Store session info
+        upload_sessions[session_id] = {
+            'filename': filename,
+            'size': file_size,
+            'total_chunks': total_chunks,
+            'received_chunks': set(),
+            'session_dir': session_dir,
+            'created_at': time.time()
+        }
+
+        print(f"📝 Filename: {filename}")
+        print(f"📊 Size: {file_size / (1024*1024):.2f}MB")
+        print(f"📦 Total chunks: {total_chunks}")
+        print(f"🆔 Session ID: {session_id}")
+        print(f"✅ Session created")
+        print(f"{'='*60}\n")
+
+        return jsonify({
+            'session_id': session_id,
+            'success': True
+        })
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload-chunk', methods=['POST'])
+@login_required
+def upload_chunk():
+    """Receive a chunk of a file."""
+    try:
+        session_id = request.form.get('session_id', '').strip()
+        chunk_number = int(request.form.get('chunk_number', 0))
+        total_chunks = int(request.form.get('total_chunks', 0))
+
+        if not session_id or session_id not in upload_sessions:
+            print(f"❌ Invalid session: {session_id}")
+            return jsonify({'error': 'Invalid session'}), 400
+
+        if 'chunk' not in request.files:
+            print(f"❌ No chunk data")
+            return jsonify({'error': 'No chunk data'}), 400
+
+        chunk = request.files['chunk']
+        session = upload_sessions[session_id]
+
+        # Save chunk
+        chunk_path = os.path.join(session['session_dir'], f"chunk_{chunk_number:04d}")
+        chunk.save(chunk_path)
+        session['received_chunks'].add(chunk_number)
+
+        chunk_size_mb = os.path.getsize(chunk_path) / (1024*1024)
+        print(f"✅ Received chunk {chunk_number}/{total_chunks} ({chunk_size_mb:.2f}MB)")
+
+        # Check if all chunks received
+        if len(session['received_chunks']) == total_chunks:
+            print(f"✅ All chunks received for session {session_id}")
+
+        return jsonify({'success': True})
+
+    except Exception as e:
+        print(f"❌ Error uploading chunk: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+def assemble_chunks(session_id: str) -> str:
+    """Assemble chunks into a complete file."""
+    try:
+        print(f"🔗 [CHUNKS] Assembling chunks for session {session_id}...")
+
+        if session_id not in upload_sessions:
+            raise Exception(f"Session not found: {session_id}")
+
+        session = upload_sessions[session_id]
+        session_dir = session['session_dir']
+        total_chunks = session['total_chunks']
+
+        # Create final file
+        filename = secure_filename(session['filename'])
+        final_path = os.path.join(UPLOAD_FOLDER, f"final_{int(time.time())}_{filename}")
+
+        with open(final_path, 'wb') as final_file:
+            for chunk_num in range(1, total_chunks + 1):
+                chunk_path = os.path.join(session_dir, f"chunk_{chunk_num:04d}")
+                if not os.path.exists(chunk_path):
+                    raise Exception(f"Missing chunk {chunk_num}")
+
+                with open(chunk_path, 'rb') as chunk_file:
+                    final_file.write(chunk_file.read())
+
+        final_size = os.path.getsize(final_path)
+        print(f"✅ Assembled file: {final_size / (1024*1024):.2f}MB")
+
+        # Cleanup session directory
+        try:
+            import shutil
+            shutil.rmtree(session_dir)
+        except:
+            pass
+
+        # Remove session from tracking
+        del upload_sessions[session_id]
+
+        return final_path
+
+    except Exception as e:
+        print(f"❌ Assembly failed: {str(e)}")
+        raise
+
+
 def upload_to_vercel_blob(file_path: str, filename: str) -> str:
     """Upload file to Vercel Blob and return the URL."""
     try:
@@ -377,42 +517,61 @@ def transcribe():
         print(f"Content-Length: {request.content_length}")
         print(f"{'='*60}")
 
-        # Check if file was uploaded
-        if 'file' not in request.files:
-            print("❌ No file in request")
-            return jsonify({'error': 'No file uploaded'}), 400
-
-        file = request.files['file']
         name = request.form.get('name', '').strip()
+        session_id = request.form.get('session_id', '').strip()
 
-        print(f"📝 File name: {file.filename}")
-        print(f"📝 Transcription name: {name}")
+        # Check for either chunked upload (session_id) or direct file upload
+        if session_id:
+            print(f"📦 Using chunked upload session: {session_id}")
+            # Assemble chunks into final file
+            temp_path = assemble_chunks(session_id)
+            file = None
+        elif 'file' in request.files:
+            print(f"📁 Using direct file upload")
+            file = request.files['file']
+            temp_path = None
+        else:
+            print("❌ No file or session provided")
+            return jsonify({'error': 'No file uploaded'}), 400
 
         if not name:
             print("❌ No name provided")
             return jsonify({'error': 'Please enter a name for this transcription'}), 400
 
-        if file.filename == '':
-            print("❌ Empty filename")
-            return jsonify({'error': 'No file selected'}), 400
+        # Handle direct file upload (if not chunked)
+        if file is not None:
+            print(f"📝 File name: {file.filename}")
 
-        if not allowed_file(file.filename):
-            print(f"❌ File type not allowed: {file.filename}")
-            return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+            if file.filename == '':
+                print("❌ Empty filename")
+                return jsonify({'error': 'No file selected'}), 400
+
+            if not allowed_file(file.filename):
+                print(f"❌ File type not allowed: {file.filename}")
+                return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+
+            print(f"\n{'='*60}")
+            print(f"🎯 Transcribing: {name}")
+            print(f"📁 File: {file.filename}")
+            print(f"{'='*60}")
+
+            # Save temp file
+            filename = secure_filename(file.filename)
+            temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
+
+            print(f"💾 Saving file to: {temp_path}")
+            file.save(temp_path)
+
+        if not temp_path or not os.path.exists(temp_path):
+            print("❌ No file to transcribe")
+            return jsonify({'error': 'File not found'}), 400
 
         print(f"\n{'='*60}")
         print(f"🎯 Transcribing: {name}")
-        print(f"📁 File: {file.filename}")
         print(f"{'='*60}")
 
-        # Save temp file
-        filename = secure_filename(file.filename)
-        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
-
-        print(f"💾 Saving file to: {temp_path}")
-        file.save(temp_path)
         file_size = os.path.getsize(temp_path)
-        print(f"✅ File saved ({file_size / (1024*1024):.2f}MB)")
+        print(f"✅ File ready ({file_size / (1024*1024):.2f}MB)")
 
         try:
             print(f"🔄 Starting transcription with Assembly AI...")
