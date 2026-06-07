@@ -71,6 +71,19 @@ def init_db():
     try:
         conn = get_db()
         c = conn.cursor()
+
+        # Check if old table exists with youtube_url column
+        c.execute("""SELECT column_name FROM information_schema.columns
+                     WHERE table_name='transcriptions'""")
+        existing_columns = [row[0] for row in c.fetchall()]
+
+        if existing_columns and 'youtube_url' in existing_columns:
+            # Drop old table and recreate with new schema
+            print("🔄 Updating database schema...")
+            c.execute('DROP TABLE IF EXISTS transcriptions CASCADE')
+            conn.commit()
+
+        # Create new table
         c.execute('''CREATE TABLE IF NOT EXISTS transcriptions
                      (id SERIAL PRIMARY KEY,
                       name TEXT NOT NULL,
