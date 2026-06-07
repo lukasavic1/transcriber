@@ -530,7 +530,7 @@
                     <div class="upload-area" id="uploadArea">
                         <div class="upload-icon">📁</div>
                         <div class="upload-text">Click to upload or drag and drop</div>
-                        <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Max 500MB)</div>
+                        <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 10MB)</div>
                     </div>
                     <input type="file" id="fileInput" accept=".mp3,.mp4,.wav,.m4a,.webm,.flac,.ogg,.aac" style="display: none;">
 
@@ -647,11 +647,22 @@
         function updateUploadUI() {
             if (selectedFile) {
                 const sizeInMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
-                uploadArea.innerHTML = `
-                    <div class="upload-icon">✅</div>
-                    <div class="upload-text">${selectedFile.name}</div>
-                    <div class="upload-subtext">${sizeInMB} MB</div>
-                `;
+
+                // Warn if file is large (Vercel limit ~10MB)
+                if (sizeInMB > 10) {
+                    uploadArea.innerHTML = `
+                        <div class="upload-icon">⚠️</div>
+                        <div class="upload-text">${selectedFile.name}</div>
+                        <div class="upload-subtext">${sizeInMB} MB - Vercel has a 10MB limit</div>
+                    `;
+                    showStatus('File is larger than Vercel limit (10MB). Works on local!', 'error');
+                } else {
+                    uploadArea.innerHTML = `
+                        <div class="upload-icon">✅</div>
+                        <div class="upload-text">${selectedFile.name}</div>
+                        <div class="upload-subtext">${sizeInMB} MB</div>
+                    `;
+                }
             }
         }
 
@@ -674,7 +685,7 @@
             uploadArea.innerHTML = `
                 <div class="upload-icon">📁</div>
                 <div class="upload-text">Click to upload or drag and drop</div>
-                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Max 500MB)</div>
+                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 10MB)</div>
             `;
             fileInput.value = '';
             hideStatus();
@@ -764,20 +775,30 @@
             formData.append('name', transcriptionName.value.trim());
 
             transcribeBtn.disabled = true;
+            const fileSizeMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
+            console.log(`[CLIENT] Starting transcription of ${selectedFile.name} (${fileSizeMB}MB)`);
             showStatus('Uploading and transcribing...');
 
             try {
+                console.log(`[CLIENT] Sending POST request to ${API_BASE}/transcribe`);
+                const startTime = Date.now();
+
                 const response = await fetch(`${API_BASE}/transcribe`, {
                     method: 'POST',
                     credentials: 'include',
                     body: formData
                 });
 
+                const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
+                console.log(`[CLIENT] Response received after ${elapsedSeconds}s, status: ${response.status}`);
+
                 if (response.status === 401) {
+                    console.log('[CLIENT] Unauthorized - redirecting to login');
                     window.location.href = '/login';
                     return;
                 }
 
+                console.log('[CLIENT] Attempting to parse JSON response...');
                 const data = await response.json();
 
                 if (!response.ok || !data.success) {
@@ -792,6 +813,9 @@
                 }, 500);
 
             } catch (error) {
+                console.error('[CLIENT] Error during transcription:', error);
+                console.error('[CLIENT] Error message:', error.message);
+                console.error('[CLIENT] Error stack:', error.stack);
                 showStatus(`Error: ${error.message}`, 'error');
             } finally {
                 transcribeBtn.disabled = false;
@@ -804,7 +828,7 @@
             uploadArea.innerHTML = `
                 <div class="upload-icon">📁</div>
                 <div class="upload-text">Click to upload or drag and drop</div>
-                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Max 500MB)</div>
+                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 10MB)</div>
             `;
             fileInput.value = '';
             hideStatus();

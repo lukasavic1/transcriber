@@ -21,7 +21,7 @@ app.secret_key = os.getenv('SECRET_KEY', 'change-this-in-production-12345')
 
 # File upload config
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'mp4', 'm4a', 'webm', 'flac', 'ogg', 'aac'}
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB for local testing
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
 UPLOAD_FOLDER = tempfile.gettempdir()
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
@@ -147,7 +147,9 @@ def convert_to_wav(audio_file_path: str) -> str:
 def transcribe_with_assembly_ai(audio_file_path: str) -> str:
     """Transcribe audio file using Assembly AI."""
     try:
-        print(f"📤 Uploading to Assembly AI...")
+        print(f"📤 [ASSEMBLY] Starting upload to Assembly AI...")
+        file_size_mb = os.path.getsize(audio_file_path) / (1024*1024)
+        print(f"📊 File size: {file_size_mb:.2f}MB")
 
         # Upload file to Assembly AI
         headers = {
@@ -167,14 +169,18 @@ def transcribe_with_assembly_ai(audio_file_path: str) -> str:
             '.aac': 'audio/aac'
         }
         mime_type = mime_types.get(file_ext, 'audio/mpeg')
+        print(f"🏷️  MIME type: {mime_type}")
 
         with open(audio_file_path, 'rb') as f:
             file_data = f.read()
+
+        print(f"📤 Uploading {len(file_data)} bytes to Assembly AI...")
 
         # Set Content-Type header explicitly
         upload_headers = headers.copy()
         upload_headers['Content-Type'] = mime_type
 
+        print(f"🌐 POST {ASSEMBLY_AI_BASE_URL}/upload")
         upload_response = requests.post(
             f'{ASSEMBLY_AI_BASE_URL}/upload',
             headers=upload_headers,
@@ -182,7 +188,9 @@ def transcribe_with_assembly_ai(audio_file_path: str) -> str:
             timeout=60
         )
 
+        print(f"📡 Upload response status: {upload_response.status_code}")
         if upload_response.status_code != 200:
+            print(f"❌ Upload failed: {upload_response.text}")
             raise Exception(f"Upload failed: {upload_response.text}")
 
         audio_url = upload_response.json()['upload_url']
@@ -287,7 +295,11 @@ def index():
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint."""
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'max_file_size_mb': MAX_FILE_SIZE / (1024 * 1024),
+        'environment': 'vercel' if IS_VERCEL else 'local'
+    })
 
 
 @app.route('/api/user', methods=['GET'])
@@ -302,20 +314,32 @@ def get_user():
 def transcribe():
     """Transcribe uploaded audio file and save to database."""
     try:
+        print(f"\n{'='*60}")
+        print(f"📡 [TRANSCRIBE START] Received request")
+        print(f"Content-Length: {request.content_length}")
+        print(f"{'='*60}")
+
         # Check if file was uploaded
         if 'file' not in request.files:
+            print("❌ No file in request")
             return jsonify({'error': 'No file uploaded'}), 400
 
         file = request.files['file']
         name = request.form.get('name', '').strip()
 
+        print(f"📝 File name: {file.filename}")
+        print(f"📝 Transcription name: {name}")
+
         if not name:
+            print("❌ No name provided")
             return jsonify({'error': 'Please enter a name for this transcription'}), 400
 
         if file.filename == '':
+            print("❌ Empty filename")
             return jsonify({'error': 'No file selected'}), 400
 
         if not allowed_file(file.filename):
+            print(f"❌ File type not allowed: {file.filename}")
             return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
 
         print(f"\n{'='*60}")
@@ -326,9 +350,14 @@ def transcribe():
         # Save temp file
         filename = secure_filename(file.filename)
         temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
+
+        print(f"💾 Saving file to: {temp_path}")
         file.save(temp_path)
+        file_size = os.path.getsize(temp_path)
+        print(f"✅ File saved ({file_size / (1024*1024):.2f}MB)")
 
         try:
+            print(f"🔄 Starting transcription with Assembly AI...")
             # Transcribe with Assembly AI (send in native format)
             transcript = transcribe_with_assembly_ai(temp_path)
 
@@ -433,7 +462,7 @@ def delete_transcription(transcription_id):
 
 @app.errorhandler(413)
 def request_too_large(e):
-    return jsonify({'error': f'File too large. Max size: 25MB'}), 413
+    return jsonify({'error': 'File too large. Vercel limit is ~10MB per file. Try a smaller file.', 'success': False}), 413
 
 
 @app.errorhandler(404)
