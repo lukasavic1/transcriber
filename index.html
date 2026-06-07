@@ -753,63 +753,66 @@
             }
         }
 
-        async function uploadToBlob(file) {
-            // Upload file directly to Vercel Blob using REST API
-            try {
-                const fileSizeMB = (file.size / (1024*1024)).toFixed(2);
-                console.log(`[CLIENT] Uploading ${file.name} (${fileSizeMB}MB) to Vercel Blob...`);
-                showStatus(`Uploading to Blob (${fileSizeMB}MB)...`);
+        async function uploadInChunks(file) {
+            // Upload large files in 3MB chunks to bypass Vercel's 4.5MB request limit
+            // Flask accumulates chunks and uploads to Vercel Blob
+            const CHUNK_SIZE = 3 * 1024 * 1024; // 3MB chunks (safe margin under 4.5MB)
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            const fileSizeMB = (file.size / (1024*1024)).toFixed(2);
 
-                // Get upload token from backend
-                const tokenResponse = await fetch(`${API_BASE}/blob-token`, {
+            console.log(`[CLIENT] File size: ${fileSizeMB}MB, splitting into ${totalChunks} chunks`);
+            showStatus(`Uploading ${fileSizeMB}MB in chunks...`);
+
+            // Create upload session
+            const sessionResponse = await fetch(`${API_BASE}/upload-session`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filename: file.name,
+                    size: file.size,
+                    chunks: totalChunks
+                })
+            });
+
+            if (!sessionResponse.ok) {
+                throw new Error('Failed to create upload session');
+            }
+
+            const { session_id } = await sessionResponse.json();
+            console.log(`[CLIENT] Upload session: ${session_id}`);
+
+            // Upload each chunk
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+                const chunkNum = i + 1;
+                const percent = Math.round((chunkNum / totalChunks) * 100);
+
+                showStatus(`Uploading chunk ${chunkNum}/${totalChunks} (${percent}%)...`);
+                console.log(`[CLIENT] Uploading chunk ${chunkNum}/${totalChunks}`);
+
+                const formData = new FormData();
+                formData.append('session_id', session_id);
+                formData.append('chunk_number', chunkNum);
+                formData.append('total_chunks', totalChunks);
+                formData.append('chunk', chunk);
+
+                const chunkResponse = await fetch(`${API_BASE}/upload-chunk`, {
                     method: 'POST',
                     credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' }
+                    body: formData
                 });
 
-                if (!tokenResponse.ok) {
-                    const error = await tokenResponse.json();
-                    throw new Error(`Failed to get Blob token: ${error.error}`);
+                if (!chunkResponse.ok) {
+                    const error = await chunkResponse.json();
+                    throw new Error(`Chunk ${chunkNum} failed: ${error.error}`);
                 }
-
-                const { token } = await tokenResponse.json();
-                console.log(`[CLIENT] Got Blob token, uploading...`);
-
-                // Create unique filename
-                const timestamp = Date.now();
-                const blobFilename = `uploads/${timestamp}-${file.name}`;
-
-                // Upload to Vercel Blob REST API
-                showStatus(`Uploading to Vercel Blob (${fileSizeMB}MB)...`);
-
-                const uploadUrl = `https://blob.vercelusercontent.com?filename=${encodeURIComponent(blobFilename)}`;
-
-                const uploadResponse = await fetch(uploadUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': file.type || 'application/octet-stream'
-                    },
-                    body: file
-                });
-
-                if (!uploadResponse.ok) {
-                    console.error(`[CLIENT] Upload response:`, uploadResponse.status, uploadResponse.statusText);
-                    const text = await uploadResponse.text();
-                    console.error(`[CLIENT] Response body:`, text);
-                    throw new Error(`Blob upload failed: ${uploadResponse.statusText}`);
-                }
-
-                const result = await uploadResponse.json();
-                const blobUrl = result.url;
-
-                console.log(`[CLIENT] Blob upload complete: ${blobUrl}`);
-                return blobUrl;
-
-            } catch (error) {
-                console.error('[CLIENT] Blob upload error:', error);
-                throw error;
             }
+
+            console.log(`[CLIENT] All chunks uploaded`);
+            return session_id;
         }
 
         async function transcribe() {
@@ -828,24 +831,24 @@
             console.log(`[CLIENT] Starting transcription of ${selectedFile.name} (${fileSizeMB}MB)`);
 
             try {
-                let blobUrl = null;
+                let sessionId = null;
 
-                // For large files on Vercel, upload to Blob first
-                if (IS_VERCEL && selectedFile.size > 4 * 1024 * 1024) {
-                    console.log(`[CLIENT] File is ${fileSizeMB}MB - uploading to Vercel Blob`);
-                    blobUrl = await uploadToBlob(selectedFile);
+                // For large files on Vercel, use chunked upload
+                if (IS_VERCEL && selectedFile.size > 3 * 1024 * 1024) {
+                    console.log(`[CLIENT] File is ${fileSizeMB}MB - using chunked upload`);
+                    sessionId = await uploadInChunks(selectedFile);
                 }
 
                 showStatus('Transcribing with Assembly AI...');
                 console.log(`[CLIENT] Sending POST request to ${API_BASE}/transcribe`);
                 const startTime = Date.now();
 
-                // Send either blob_url (large file) or file (small file)
+                // Send either session_id (chunked) or file (direct)
                 const formData = new FormData();
                 formData.append('name', transcriptionName.value.trim());
 
-                if (blobUrl) {
-                    formData.append('blob_url', blobUrl);
+                if (sessionId) {
+                    formData.append('session_id', sessionId);
                 } else {
                     formData.append('file', selectedFile);
                 }

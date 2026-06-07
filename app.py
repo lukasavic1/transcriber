@@ -318,27 +318,175 @@ def get_user():
 
 
 
-@app.route('/api/blob-token', methods=['POST'])
+# Track chunked upload sessions
+upload_sessions = {}
+
+
+@app.route('/api/upload-session', methods=['POST'])
 @login_required
-def get_blob_token():
-    """Return Vercel Blob token for client-side uploads."""
+def create_upload_session():
+    """Create session for chunked file upload."""
     try:
         print(f"\n{'='*60}")
-        print(f"🔑 [BLOB] Returning token for client-side upload")
+        print(f"📋 [CHUNKS] Creating upload session...")
+        print(f"{'='*60}")
+
+        data = request.get_json()
+        filename = data.get('filename', '').strip()
+        file_size = data.get('size', 0)
+        total_chunks = data.get('chunks', 0)
+
+        if not filename or not allowed_file(filename):
+            return jsonify({'error': 'Invalid file'}), 400
+
+        session_id = f"{int(time.time())}_{os.urandom(8).hex()}"
+        session_dir = os.path.join(UPLOAD_FOLDER, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+
+        upload_sessions[session_id] = {
+            'filename': filename,
+            'size': file_size,
+            'total_chunks': total_chunks,
+            'received_chunks': set(),
+            'session_dir': session_dir
+        }
+
+        print(f"📝 Filename: {filename}")
+        print(f"📊 Size: {file_size / (1024*1024):.2f}MB in {total_chunks} chunks")
+        print(f"✅ Session: {session_id}")
         print(f"{'='*60}\n")
 
-        if not BLOB_READ_WRITE_TOKEN:
-            print("❌ BLOB_READ_WRITE_TOKEN not configured")
-            return jsonify({'error': 'Blob storage not configured'}), 500
-
-        return jsonify({
-            'token': BLOB_READ_WRITE_TOKEN,
-            'success': True
-        })
+        return jsonify({'session_id': session_id, 'success': True})
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/upload-chunk', methods=['POST'])
+@login_required
+def upload_chunk():
+    """Receive a chunk of a file."""
+    try:
+        session_id = request.form.get('session_id', '').strip()
+        chunk_num = int(request.form.get('chunk_number', 0))
+        total_chunks = int(request.form.get('total_chunks', 0))
+
+        if session_id not in upload_sessions:
+            return jsonify({'error': 'Invalid session'}), 400
+
+        if 'chunk' not in request.files:
+            return jsonify({'error': 'No chunk data'}), 400
+
+        chunk = request.files['chunk']
+        session = upload_sessions[session_id]
+
+        # Save chunk to session directory
+        chunk_path = os.path.join(session['session_dir'], f"chunk_{chunk_num:05d}")
+        chunk.save(chunk_path)
+        session['received_chunks'].add(chunk_num)
+
+        chunk_size_mb = os.path.getsize(chunk_path) / (1024*1024)
+        print(f"✅ Chunk {chunk_num}/{total_chunks} ({chunk_size_mb:.2f}MB)")
+
+        return jsonify({'success': True})
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+def assemble_and_upload_chunks(session_id: str) -> str:
+    """Assemble chunks and upload to Vercel Blob."""
+    try:
+        print(f"🔗 [CHUNKS] Assembling session {session_id}...")
+
+        if session_id not in upload_sessions:
+            raise Exception("Session not found")
+
+        session = upload_sessions[session_id]
+        session_dir = session['session_dir']
+        total_chunks = session['total_chunks']
+        filename = session['filename']
+
+        # Assemble file from chunks
+        final_path = os.path.join(UPLOAD_FOLDER, f"assembled_{int(time.time())}_{secure_filename(filename)}")
+
+        with open(final_path, 'wb') as final_file:
+            for i in range(1, total_chunks + 1):
+                chunk_path = os.path.join(session_dir, f"chunk_{i:05d}")
+                if not os.path.exists(chunk_path):
+                    raise Exception(f"Missing chunk {i}")
+
+                with open(chunk_path, 'rb') as chunk_file:
+                    final_file.write(chunk_file.read())
+
+        final_size = os.path.getsize(final_path)
+        print(f"✅ Assembled: {final_size / (1024*1024):.2f}MB")
+
+        # Cleanup chunks
+        try:
+            import shutil
+            shutil.rmtree(session_dir)
+        except:
+            pass
+
+        del upload_sessions[session_id]
+
+        # Upload to Vercel Blob if token is available
+        if BLOB_READ_WRITE_TOKEN and IS_VERCEL:
+            print(f"📤 [BLOB] Uploading to Vercel Blob...")
+            blob_url = upload_file_to_blob(final_path, filename)
+            if blob_url:
+                print(f"✅ Blob URL: {blob_url}")
+                return blob_url
+
+        # If no Blob, return local path (won't work on Vercel but useful for testing)
+        return final_path
+
+    except Exception as e:
+        print(f"❌ Assembly failed: {str(e)}")
+        raise
+
+
+def upload_file_to_blob(file_path: str, filename: str) -> str:
+    """Upload file to Vercel Blob."""
+    try:
+        if not BLOB_READ_WRITE_TOKEN:
+            return None
+
+        file_size = os.path.getsize(file_path)
+        print(f"📊 File size: {file_size / (1024*1024):.2f}MB")
+
+        # Generate blob filename
+        blob_filename = f"uploads/{int(time.time())}-{secure_filename(filename)}"
+
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+
+        # Upload via REST API
+        headers = {
+            'Authorization': f'Bearer {BLOB_READ_WRITE_TOKEN}',
+            'Content-Type': 'application/octet-stream'
+        }
+
+        blob_url = f"https://blob.vercelusercontent.com?filename={blob_filename}"
+        print(f"📡 Uploading to: {blob_url}")
+
+        response = requests.post(blob_url, headers=headers, data=file_data, timeout=300)
+
+        if response.status_code == 200:
+            result = response.json()
+            url = result.get('url')
+            print(f"✅ Uploaded: {url}")
+            return url
+        else:
+            print(f"⚠️  Status {response.status_code}: {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"⚠️  Blob upload failed: {str(e)}")
+        return None
 
 
 
@@ -346,7 +494,7 @@ def get_blob_token():
 @app.route('/api/transcribe', methods=['POST'])
 @login_required
 def transcribe():
-    """Transcribe audio file (from direct upload or Blob URL) and save to database."""
+    """Transcribe audio file and save to database."""
     try:
         print(f"\n{'='*60}")
         print(f"📡 [TRANSCRIBE START] Received request")
@@ -354,7 +502,7 @@ def transcribe():
         print(f"{'='*60}")
 
         name = request.form.get('name', '').strip()
-        blob_url = request.form.get('blob_url', '').strip()
+        session_id = request.form.get('session_id', '').strip()
 
         if not name:
             print("❌ No name provided")
@@ -363,20 +511,14 @@ def transcribe():
         temp_path = None
 
         try:
-            # Check if using Blob URL or direct file upload
-            if blob_url:
-                print(f"📥 Using Blob URL: {blob_url}")
+            # Check if using chunked upload or direct file upload
+            if session_id:
+                print(f"📦 Assembling chunks from session: {session_id}")
                 print(f"🎯 Transcribing: {name}")
                 print(f"{'='*60}")
 
-                # Download from Blob
-                filename = blob_url.split('/')[-1]
-                temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
-
-                print(f"💾 Downloading from Blob to: {temp_path}")
-                urllib.request.urlretrieve(blob_url, temp_path)
-                file_size = os.path.getsize(temp_path)
-                print(f"✅ Downloaded ({file_size / (1024*1024):.2f}MB)")
+                # Assemble chunks and upload to Blob
+                temp_path = assemble_and_upload_chunks(session_id)
 
             elif 'file' in request.files:
                 print(f"📁 Using direct file upload")
