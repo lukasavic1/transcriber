@@ -85,15 +85,15 @@ def get_audio_url_from_youtube(youtube_url: str) -> str:
         configs = [
             {
                 'name': 'Web Player',
-                'player_client': ['web'],
+                'player_client': 'web',
             },
             {
                 'name': 'TV Embedded',
-                'player_client': ['tv'],
+                'player_client': 'tv',
             },
             {
                 'name': 'iOS',
-                'player_client': ['ios'],
+                'player_client': 'ios',
             },
         ]
 
@@ -119,8 +119,8 @@ def get_audio_url_from_youtube(youtube_url: str) -> str:
                     },
                     'extractor_args': {
                         'youtube': {
-                            'player_client': [config['player_client']],
-                            'player_skip': ['configs'],
+                            'player_client': config['player_client'],
+                            'player_skip': 'configs',
                         }
                     },
                     'retries': 5,
