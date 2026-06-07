@@ -9,15 +9,22 @@ from flask_login import LoginManager, UserMixin, login_user, logout_user, login_
 from dotenv import load_dotenv
 import psycopg2
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 import requests
-import yt_dlp
-import json
 
 load_dotenv()
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app, supports_credentials=True)
 app.secret_key = os.getenv('SECRET_KEY', 'change-this-in-production-12345')
+
+# File upload config
+ALLOWED_EXTENSIONS = {'mp3', 'wav', 'mp4', 'm4a', 'webm', 'flac', 'ogg', 'aac'}
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+UPLOAD_FOLDER = tempfile.gettempdir()
+
+app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -66,7 +73,6 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS transcriptions
                      (id SERIAL PRIMARY KEY,
                       name TEXT NOT NULL,
-                      youtube_url TEXT NOT NULL,
                       transcript TEXT NOT NULL,
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         conn.commit()
@@ -76,86 +82,9 @@ def init_db():
         print(f"❌ Database init error: {e}")
 
 
-def download_audio_from_youtube(youtube_url: str) -> str:
-    """Download audio from YouTube using yt-dlp and return file path."""
-    try:
-        print(f"🎬 Downloading audio from YouTube...")
-
-        audio_dir = Path(tempfile.gettempdir()) / 'transcribe_audio'
-        audio_dir.mkdir(exist_ok=True)
-
-        # Try multiple times with different configurations
-        configs = [
-            {
-                'name': 'Web Player',
-                'player_client': 'web',
-            },
-            {
-                'name': 'TV Embedded',
-                'player_client': 'tv',
-            },
-            {
-                'name': 'iOS',
-                'player_client': 'ios',
-            },
-        ]
-
-        last_error = None
-
-        for config in configs:
-            try:
-                print(f"📥 Trying {config['name']}...")
-
-                ydl_opts = {
-                    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio/best',
-                    'quiet': False,
-                    'no_warnings': False,
-                    'socket_timeout': 60,
-                    'outtmpl': str(audio_dir / '%(id)s'),
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept-Encoding': 'gzip, deflate',
-                        'DNT': '1',
-                        'Connection': 'keep-alive',
-                        'Upgrade-Insecure-Requests': '1',
-                    },
-                    'extractor_args': {
-                        'youtube': {
-                            'player_client': config['player_client'],
-                            'player_skip': 'configs',
-                        }
-                    },
-                    'retries': 5,
-                    'fragment_retries': 5,
-                    'skip_unavailable_fragments': True,
-                    'allow_unplayable_formats': True,
-                }
-
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=True)
-                    video_id = info['id']
-                    audio_file = audio_dir / f"{video_id}.mp3"
-
-                    if audio_file.exists():
-                        print(f"✅ Downloaded with {config['name']}! ({audio_file.stat().st_size} bytes)")
-                        return str(audio_file)
-
-            except Exception as e:
-                last_error = str(e)
-                print(f"⚠️  {config['name']} failed: {last_error}")
-                continue
-
-        error_msg = last_error or "Could not download audio"
-        raise Exception(error_msg)
-
-    except Exception as e:
-        raise Exception(f"Failed to download audio: {str(e)}")
+def allowed_file(filename):
+    """Check if file extension is allowed."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 def transcribe_with_assembly_ai(audio_file_path: str) -> str:
@@ -295,59 +224,64 @@ def get_user():
 @app.route('/api/transcribe', methods=['POST'])
 @login_required
 def transcribe():
-    """Transcribe a YouTube video and save to database."""
+    """Transcribe uploaded audio file and save to database."""
     try:
-        data = request.json
-        youtube_url = data.get('url', '').strip()
-        name = data.get('name', '').strip()
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
 
-        if not youtube_url:
-            return jsonify({'error': 'YouTube URL is required'}), 400
+        file = request.files['file']
+        name = request.form.get('name', '').strip()
 
         if not name:
-            return jsonify({'error': 'Name is required'}), 400
+            return jsonify({'error': 'Please enter a name for this transcription'}), 400
 
-        # Validate YouTube URL
-        if 'youtube.com' not in youtube_url and 'youtu.be' not in youtube_url:
-            return jsonify({'error': 'Invalid YouTube URL'}), 400
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+
+        if not allowed_file(file.filename):
+            return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
 
         print(f"\n{'='*60}")
         print(f"🎯 Transcribing: {name}")
+        print(f"📁 File: {file.filename}")
         print(f"{'='*60}")
 
-        # Step 1: Download audio with yt-dlp
-        audio_file = download_audio_from_youtube(youtube_url)
+        # Save temp file
+        filename = secure_filename(file.filename)
+        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
+        file.save(temp_path)
 
         try:
-            # Step 2: Transcribe with Assembly AI
-            transcript = transcribe_with_assembly_ai(audio_file)
+            # Transcribe with Assembly AI
+            transcript = transcribe_with_assembly_ai(temp_path)
+
+            # Save to database
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('INSERT INTO transcriptions (name, transcript) VALUES (%s, %s) RETURNING id',
+                      (name, transcript))
+            transcription_id = c.fetchone()[0]
+            conn.commit()
+            conn.close()
+
+            print(f"✅ Saved to database (ID: {transcription_id})")
+            print(f"{'='*60}\n")
+
+            return jsonify({
+                'success': True,
+                'id': transcription_id,
+                'transcript': transcript,
+                'name': name
+            })
+
         finally:
-            # Clean up
+            # Always delete temp file
             try:
-                os.remove(audio_file)
+                os.remove(temp_path)
                 print("✅ Cleaned up temp file")
             except:
                 pass
-
-        # Step 3: Save to database
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('INSERT INTO transcriptions (name, youtube_url, transcript) VALUES (%s, %s, %s) RETURNING id',
-                  (name, youtube_url, transcript))
-        transcription_id = c.fetchone()[0]
-        conn.commit()
-        conn.close()
-
-        print(f"✅ Saved to database (ID: {transcription_id})")
-        print(f"{'='*60}\n")
-
-        return jsonify({
-            'success': True,
-            'id': transcription_id,
-            'transcript': transcript,
-            'url': youtube_url,
-            'name': name
-        })
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
@@ -364,15 +298,14 @@ def get_transcriptions():
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute('SELECT id, name, youtube_url, created_at FROM transcriptions ORDER BY created_at DESC')
+        c.execute('SELECT id, name, created_at FROM transcriptions ORDER BY created_at DESC')
         rows = c.fetchall()
         conn.close()
 
         transcriptions = [{
             'id': row[0],
             'name': row[1],
-            'youtube_url': row[2],
-            'created_at': row[3].isoformat() if row[3] else None
+            'created_at': row[2].isoformat() if row[2] else None
         } for row in rows]
 
         return jsonify({'transcriptions': transcriptions})
@@ -387,7 +320,7 @@ def get_transcription(transcription_id):
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute('SELECT id, name, youtube_url, transcript, created_at FROM transcriptions WHERE id = %s',
+        c.execute('SELECT id, name, transcript, created_at FROM transcriptions WHERE id = %s',
                   (transcription_id,))
         row = c.fetchone()
         conn.close()
@@ -398,9 +331,8 @@ def get_transcription(transcription_id):
         return jsonify({
             'id': row[0],
             'name': row[1],
-            'youtube_url': row[2],
-            'transcript': row[3],
-            'created_at': row[4].isoformat() if row[4] else None
+            'transcript': row[2],
+            'created_at': row[3].isoformat() if row[3] else None
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
