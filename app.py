@@ -81,48 +81,83 @@ def get_audio_url_from_youtube(youtube_url: str) -> str:
     try:
         print(f"🎬 Extracting audio URL from YouTube...")
 
-        ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
-            'quiet': False,
-            'no_warnings': False,
-            'socket_timeout': 60,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
+        # Try multiple times with different configurations
+        configs = [
+            {
+                'name': 'Web Player',
+                'player_client': ['web'],
             },
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['web'],
-                    'player_skip': ['js', 'configs'],
+            {
+                'name': 'TV Embedded',
+                'player_client': ['tv'],
+            },
+            {
+                'name': 'iOS',
+                'player_client': ['ios'],
+            },
+        ]
+
+        audio_url = None
+        last_error = None
+
+        for config in configs:
+            try:
+                print(f"📥 Trying {config['name']}...")
+
+                ydl_opts = {
+                    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio/best',
+                    'quiet': False,
+                    'no_warnings': False,
+                    'socket_timeout': 60,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                    },
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': [config['player_client']],
+                            'player_skip': ['configs'],
+                        }
+                    },
+                    'retries': 5,
+                    'fragment_retries': 5,
+                    'skip_unavailable_fragments': True,
+                    'allow_unplayable_formats': True,
                 }
-            },
-            'retries': 10,
-            'fragment_retries': 10,
-            'skip_unavailable_fragments': True,
-        }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            print(f"📥 Fetching video info...")
-            info = ydl.extract_info(youtube_url, download=False)
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
 
-            # Get the audio URL - try different sources
-            audio_url = None
-
-            if 'url' in info:
-                audio_url = info['url']
-            elif 'formats' in info and len(info['formats']) > 0:
-                # Find best audio format
-                for fmt in info['formats']:
-                    if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
-                        audio_url = fmt.get('url')
+                    # Get the audio URL
+                    if 'url' in info:
+                        audio_url = info['url']
+                        print(f"✅ Got audio URL with {config['name']}!")
+                        break
+                    elif 'formats' in info and len(info['formats']) > 0:
+                        for fmt in info['formats']:
+                            if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
+                                if 'url' in fmt:
+                                    audio_url = fmt['url']
+                                    print(f"✅ Got audio URL with {config['name']}!")
+                                    break
                         if audio_url:
                             break
 
-            if audio_url:
-                print(f"✅ Got audio URL! ({len(audio_url)} chars)")
-                return audio_url
-            else:
-                raise Exception("Could not extract audio URL - video may be restricted or unavailable")
+            except Exception as e:
+                last_error = str(e)
+                print(f"⚠️  {config['name']} failed: {last_error}")
+                continue
+
+        if audio_url:
+            print(f"✅ Got audio URL! ({len(audio_url)} chars)")
+            return audio_url
+        else:
+            error_msg = last_error or "Could not extract audio URL"
+            raise Exception(error_msg)
 
     except Exception as e:
         raise Exception(f"Failed to extract audio URL: {str(e)}")
