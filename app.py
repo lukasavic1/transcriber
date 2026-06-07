@@ -20,7 +20,7 @@ app.secret_key = os.getenv('SECRET_KEY', 'change-this-in-production-12345')
 
 # File upload config
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'mp4', 'm4a', 'webm', 'flac', 'ogg', 'aac'}
-MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB (Vercel friendly)
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB for local testing
 UPLOAD_FOLDER = tempfile.gettempdir()
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
