@@ -1,5 +1,6 @@
 import os
 import time
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory, redirect, url_for
@@ -9,6 +10,8 @@ from dotenv import load_dotenv
 import psycopg2
 from werkzeug.security import generate_password_hash, check_password_hash
 import requests
+import yt_dlp
+import json
 
 load_dotenv()
 
@@ -73,20 +76,58 @@ def init_db():
         print(f"❌ Database init error: {e}")
 
 
-def transcribe_with_assembly_ai(youtube_url: str) -> str:
-    """Transcribe YouTube video using Assembly AI."""
+def get_audio_url_from_youtube(youtube_url: str) -> str:
+    """Extract audio stream URL from YouTube using yt-dlp."""
     try:
-        # Submit transcription job
+        print(f"🎬 Extracting audio URL from YouTube...")
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 60,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web'],
+                }
+            },
+            'retries': 5,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print(f"📥 Fetching video info...")
+            info = ydl.extract_info(youtube_url, download=False)
+
+            # Get the audio URL
+            if 'url' in info:
+                audio_url = info['url']
+                print(f"✅ Got audio URL! ({len(audio_url)} chars)")
+                return audio_url
+            else:
+                raise Exception("Could not extract audio URL from video")
+
+    except Exception as e:
+        raise Exception(f"Failed to extract audio URL: {str(e)}")
+
+
+def transcribe_with_assembly_ai(audio_url: str) -> str:
+    """Transcribe audio URL using Assembly AI."""
+    try:
+        print(f"📤 Submitting to Assembly AI...")
+
         headers = {
             'Authorization': ASSEMBLY_AI_API_KEY,
             'Content-Type': 'application/json'
         }
 
         data = {
-            'audio_url': youtube_url
+            'audio_url': audio_url
         }
 
-        print(f"📤 Submitting transcription request for: {youtube_url}")
+        # Submit transcription job
         response = requests.post(
             f'{ASSEMBLY_AI_BASE_URL}/transcript',
             json=data,
@@ -95,25 +136,25 @@ def transcribe_with_assembly_ai(youtube_url: str) -> str:
         )
 
         if response.status_code != 200:
-            raise Exception(f"Assembly AI submission failed: {response.text}")
+            raise Exception(f"Submission failed: {response.text}")
 
         transcript_id = response.json()['id']
-        print(f"✅ Transcription job submitted: {transcript_id}")
+        print(f"✅ Job submitted: {transcript_id}")
 
         # Poll for completion
-        print("⏳ Waiting for transcription to complete...")
-        max_attempts = 120  # 10 minutes with 5-second intervals
+        print("⏳ Waiting for transcription...")
+        max_attempts = 120  # 10 minutes
         attempt = 0
 
         while attempt < max_attempts:
             result_response = requests.get(
                 f'{ASSEMBLY_AI_BASE_URL}/transcript/{transcript_id}',
-                headers=headers,
+                headers={'Authorization': ASSEMBLY_AI_API_KEY},
                 timeout=30
             )
 
             if result_response.status_code != 200:
-                raise Exception(f"Failed to check transcription status: {result_response.text}")
+                raise Exception(f"Status check failed: {result_response.text}")
 
             result = result_response.json()
 
@@ -122,19 +163,18 @@ def transcribe_with_assembly_ai(youtube_url: str) -> str:
                 return result.get('text', '')
 
             elif result['status'] == 'error':
-                raise Exception(f"Transcription failed: {result.get('error', 'Unknown error')}")
+                raise Exception(f"Transcription error: {result.get('error', 'Unknown')}")
 
-            # Still processing, wait and retry
             attempt += 1
-            if attempt % 10 == 0:  # Log every 50 seconds
-                print(f"⏳ Still processing... ({attempt * 5} seconds elapsed)")
+            if attempt % 12 == 0:  # Log every 60 seconds
+                print(f"⏳ Processing... ({attempt * 5} seconds)")
 
             time.sleep(5)
 
-        raise Exception("Transcription timed out after 10 minutes")
+        raise Exception("Transcription timed out")
 
     except Exception as e:
-        raise Exception(f"Failed to transcribe: {str(e)}")
+        raise Exception(f"Assembly AI transcription failed: {str(e)}")
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -210,10 +250,17 @@ def transcribe():
         if 'youtube.com' not in youtube_url and 'youtu.be' not in youtube_url:
             return jsonify({'error': 'Invalid YouTube URL'}), 400
 
-        # Transcribe with Assembly AI
-        transcript = transcribe_with_assembly_ai(youtube_url)
+        print(f"\n{'='*60}")
+        print(f"🎯 Transcribing: {name}")
+        print(f"{'='*60}")
 
-        # Save to database
+        # Step 1: Extract audio URL with yt-dlp
+        audio_url = get_audio_url_from_youtube(youtube_url)
+
+        # Step 2: Transcribe with Assembly AI
+        transcript = transcribe_with_assembly_ai(audio_url)
+
+        # Step 3: Save to database
         conn = get_db()
         c = conn.cursor()
         c.execute('INSERT INTO transcriptions (name, youtube_url, transcript) VALUES (%s, %s, %s) RETURNING id',
@@ -221,6 +268,9 @@ def transcribe():
         transcription_id = c.fetchone()[0]
         conn.commit()
         conn.close()
+
+        print(f"✅ Saved to database (ID: {transcription_id})")
+        print(f"{'='*60}\n")
 
         return jsonify({
             'success': True,
@@ -231,6 +281,7 @@ def transcribe():
         })
 
     except Exception as e:
+        print(f"❌ Error: {str(e)}")
         return jsonify({
             'success': False,
             'error': str(e)
