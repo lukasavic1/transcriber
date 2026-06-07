@@ -651,21 +651,12 @@
             if (selectedFile) {
                 const sizeInMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
 
-                // Warn if file is large (Vercel limit ~10MB)
-                if (sizeInMB > 10) {
-                    uploadArea.innerHTML = `
-                        <div class="upload-icon">⚠️</div>
-                        <div class="upload-text">${selectedFile.name}</div>
-                        <div class="upload-subtext">${sizeInMB} MB - Vercel has a 10MB limit</div>
-                    `;
-                    showStatus('File is larger than Vercel limit (10MB). Works on local!', 'error');
-                } else {
-                    uploadArea.innerHTML = `
-                        <div class="upload-icon">✅</div>
-                        <div class="upload-text">${selectedFile.name}</div>
-                        <div class="upload-subtext">${sizeInMB} MB</div>
-                    `;
-                }
+                // Show file selected (Blob will handle large files on Vercel)
+                uploadArea.innerHTML = `
+                    <div class="upload-icon">✅</div>
+                    <div class="upload-text">${selectedFile.name}</div>
+                    <div class="upload-subtext">${sizeInMB} MB</div>
+                `;
             }
         }
 
