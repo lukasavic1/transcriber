@@ -339,7 +339,8 @@ def load_session_meta(session_id: str) -> dict:
         if os.path.exists(meta_path):
             with open(meta_path, 'r') as f:
                 meta = json.load(f)
-                meta['received_chunks'] = set(meta.get('received_chunks', []))
+                # Keep received_chunks as a list (JSON-serializable)
+                meta['received_chunks'] = meta.get('received_chunks', [])
                 return meta
     except Exception as e:
         print(f"⚠️  Failed to load session metadata: {e}")
