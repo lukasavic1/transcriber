@@ -11,7 +11,7 @@ import psycopg2
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import requests
-from pydub import AudioSegment
+import subprocess
 
 load_dotenv()
 
@@ -89,7 +89,7 @@ def allowed_file(filename):
 
 
 def convert_to_wav(audio_file_path: str) -> str:
-    """Convert audio file to WAV format."""
+    """Convert audio file to WAV format using ffmpeg."""
     try:
         file_ext = Path(audio_file_path).suffix.lower()
 
@@ -99,12 +99,23 @@ def convert_to_wav(audio_file_path: str) -> str:
 
         print(f"🔄 Converting {file_ext} to WAV...")
 
-        # Load audio file
-        audio = AudioSegment.from_file(audio_file_path)
-
-        # Export as WAV
         wav_path = audio_file_path.replace(file_ext, '.wav')
-        audio.export(wav_path, format='wav')
+
+        # Use ffmpeg to convert
+        cmd = [
+            'ffmpeg',
+            '-i', audio_file_path,
+            '-acodec', 'pcm_s16le',  # PCM 16-bit LE (standard WAV codec)
+            '-ar', '16000',  # 16kHz sample rate (Assembly AI friendly)
+            '-ac', '1',  # Mono
+            '-y',  # Overwrite output
+            wav_path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+
+        if result.returncode != 0:
+            raise Exception(f"FFmpeg error: {result.stderr.decode()}")
 
         print(f"✅ Converted to WAV: {wav_path}")
 
