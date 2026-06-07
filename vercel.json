@@ -1,8 +1,7 @@
 {
   "buildCommand": "bash build.sh",
   "functions": {
-    "app.py": {
-      "runtime": "python3.11",
+    "api/index.py": {
       "memory": 2048,
       "maxDuration": 300
     }
