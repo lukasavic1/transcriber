@@ -11,6 +11,7 @@ import psycopg2
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import requests
+from pydub import AudioSegment
 
 load_dotenv()
 
@@ -87,6 +88,38 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def convert_to_wav(audio_file_path: str) -> str:
+    """Convert audio file to WAV format."""
+    try:
+        file_ext = Path(audio_file_path).suffix.lower()
+
+        # If already WAV, no conversion needed
+        if file_ext == '.wav':
+            return audio_file_path
+
+        print(f"🔄 Converting {file_ext} to WAV...")
+
+        # Load audio file
+        audio = AudioSegment.from_file(audio_file_path)
+
+        # Export as WAV
+        wav_path = audio_file_path.replace(file_ext, '.wav')
+        audio.export(wav_path, format='wav')
+
+        print(f"✅ Converted to WAV: {wav_path}")
+
+        # Delete original file
+        try:
+            os.remove(audio_file_path)
+        except:
+            pass
+
+        return wav_path
+
+    except Exception as e:
+        raise Exception(f"Audio conversion failed: {str(e)}")
+
+
 def transcribe_with_assembly_ai(audio_file_path: str) -> str:
     """Transcribe audio file using Assembly AI."""
     try:
@@ -97,8 +130,22 @@ def transcribe_with_assembly_ai(audio_file_path: str) -> str:
             'Authorization': ASSEMBLY_AI_API_KEY,
         }
 
+        # Determine correct MIME type based on file extension
+        file_ext = Path(audio_file_path).suffix.lower()
+        mime_types = {
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.m4a': 'audio/mp4',
+            '.mp4': 'video/mp4',
+            '.webm': 'audio/webm',
+            '.flac': 'audio/flac',
+            '.ogg': 'audio/ogg',
+            '.aac': 'audio/aac'
+        }
+        mime_type = mime_types.get(file_ext, 'audio/mpeg')
+
         with open(audio_file_path, 'rb') as f:
-            files = {'file': (Path(audio_file_path).name, f, 'audio/mpeg')}
+            files = {'file': (Path(audio_file_path).name, f, mime_type)}
             upload_response = requests.post(
                 f'{ASSEMBLY_AI_BASE_URL}/upload',
                 headers=headers,
@@ -253,8 +300,11 @@ def transcribe():
         file.save(temp_path)
 
         try:
+            # Convert to WAV for better compatibility
+            wav_path = convert_to_wav(temp_path)
+
             # Transcribe with Assembly AI
-            transcript = transcribe_with_assembly_ai(temp_path)
+            transcript = transcribe_with_assembly_ai(wav_path)
 
             # Save to database
             conn = get_db()
@@ -276,12 +326,14 @@ def transcribe():
             })
 
         finally:
-            # Always delete temp file
-            try:
-                os.remove(temp_path)
-                print("✅ Cleaned up temp file")
-            except:
-                pass
+            # Always delete temp files
+            for path in [temp_path, temp_path.replace(Path(temp_path).suffix, '.wav')]:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except:
+                    pass
+            print("✅ Cleaned up temp files")
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
