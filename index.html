@@ -753,53 +753,8 @@
             }
         }
 
-        async function uploadToVercelBlob(file) {
-            // Upload file directly to Vercel Blob and return the URL
-            try {
-                console.log(`[CLIENT] Uploading ${file.name} to Vercel Blob...`);
-                showStatus(`Uploading to Blob storage (${(file.size / (1024 * 1024)).toFixed(2)}MB)...`);
-
-                // Get upload metadata from the backend (token, filename, etc)
-                const metadataResponse = await fetch(`${API_BASE}/blob-upload-token`, {
-                    method: 'POST',
-                    credentials: 'include',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        filename: file.name,
-                        size: file.size
-                    })
-                });
-
-                if (!metadataResponse.ok) {
-                    const data = await metadataResponse.json();
-                    throw new Error(`Failed to get upload token: ${data.error}`);
-                }
-
-                const { token, uploadUrl, downloadUrl } = await metadataResponse.json();
-                console.log(`[CLIENT] Got upload token, uploading file to: ${uploadUrl}`);
-
-                // Upload directly to Vercel Blob
-                const uploadResponse = await fetch(uploadUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': file.type || 'application/octet-stream'
-                    },
-                    body: file
-                });
-
-                if (!uploadResponse.ok) {
-                    console.error(`[CLIENT] Blob upload response:`, uploadResponse.status, uploadResponse.statusText);
-                    throw new Error(`Blob upload failed: ${uploadResponse.statusText}`);
-                }
-
-                console.log(`[CLIENT] Blob upload complete: ${downloadUrl}`);
-                return downloadUrl;
-            } catch (error) {
-                console.error('[CLIENT] Blob upload error:', error);
-                throw error;
-            }
-        }
+        // Note: Large files are now handled by Flask backend streaming to Blob
+        // No separate Blob upload function needed - Flask handles it all
 
         async function transcribe() {
             if (!selectedFile) {
@@ -817,43 +772,19 @@
             console.log(`[CLIENT] Starting transcription of ${selectedFile.name} (${fileSizeMB}MB)`);
 
             try {
-                // If file is large and on Vercel, upload to Blob first
-                let uploadUrl = null;
-                if (IS_VERCEL && selectedFile.size > BLOB_UPLOAD_THRESHOLD) {
-                    console.log(`[CLIENT] File is ${fileSizeMB}MB - using Vercel Blob`);
-                    uploadUrl = await uploadToVercelBlob(selectedFile);
-                }
-
-                showStatus('Transcribing with Assembly AI...');
+                showStatus(`Uploading and transcribing (${fileSizeMB}MB)...`);
                 console.log(`[CLIENT] Sending POST request to ${API_BASE}/transcribe`);
                 const startTime = Date.now();
 
-                const transcribeData = {
-                    name: transcriptionName.value.trim()
-                };
-
-                // If we have a blob URL, use it; otherwise send file directly
-                let requestBody;
-                let requestHeaders = {
-                    'Content-Type': 'application/json'
-                };
-
-                if (uploadUrl) {
-                    transcribeData.blob_url = uploadUrl;
-                    requestBody = JSON.stringify(transcribeData);
-                } else {
-                    const formData = new FormData();
-                    formData.append('file', selectedFile);
-                    formData.append('name', transcribeData.name);
-                    requestBody = formData;
-                    requestHeaders = {};
-                }
+                // Build form data with file and name
+                const formData = new FormData();
+                formData.append('file', selectedFile);
+                formData.append('name', transcriptionName.value.trim());
 
                 const response = await fetch(`${API_BASE}/transcribe`, {
                     method: 'POST',
                     credentials: 'include',
-                    headers: requestHeaders,
-                    body: requestBody
+                    body: formData
                 });
 
                 const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(2);

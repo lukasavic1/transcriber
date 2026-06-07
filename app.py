@@ -316,134 +316,105 @@ def get_user():
     return jsonify({'username': current_user.username})
 
 
-@app.route('/api/blob-upload-token', methods=['POST'])
-@login_required
-def blob_upload_token():
-    """Generate upload token and URL for direct Blob upload from frontend."""
+
+
+def upload_to_vercel_blob(file_path: str, filename: str) -> str:
+    """Upload file to Vercel Blob and return the URL."""
     try:
-        print(f"\n{'='*60}")
-        print(f"📋 [BLOB] Generating upload token...")
-        print(f"{'='*60}")
-
         if not VERCEL_BLOB_TOKEN:
-            print("❌ VERCEL_BLOB_READ_WRITE_TOKEN not configured")
-            return jsonify({'error': 'Blob storage not configured'}), 500
+            print("⚠️  Blob token not configured, skipping Blob upload")
+            return None
 
-        data = request.get_json()
-        filename = data.get('filename', '').strip()
-        file_size = data.get('size', 0)
+        print(f"📤 [BLOB] Uploading to Vercel Blob...")
+        file_size = os.path.getsize(file_path)
+        print(f"📊 File size: {file_size / (1024*1024):.2f}MB")
 
-        if not filename:
-            print("❌ No filename provided")
-            return jsonify({'error': 'Filename required'}), 400
-
-        if not allowed_file(filename):
-            print(f"❌ File type not allowed: {filename}")
-            return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
-
-        print(f"📝 Filename: {filename}")
-        print(f"📊 Size: {file_size / (1024*1024):.2f}MB")
-
-        # Generate a unique filename for storage
+        # Generate storage filename
         storage_filename = f"{int(time.time())}_{secure_filename(filename)}"
 
-        # Vercel Blob upload endpoint
-        # Frontend will upload directly to this URL with Bearer token
-        upload_url = f"https://blob.vercelusercontent.com?filename={storage_filename}"
-        download_url = f"https://blob.vercelusercontent.com/{storage_filename}"
+        # Upload to Vercel Blob API
+        blob_api_url = f"https://blob.vercelusercontent.com?filename={storage_filename}"
 
-        print(f"📤 Upload URL: {upload_url}")
-        print(f"📥 Download URL: {download_url}")
-        print(f"✅ Upload token generated")
-        print(f"{'='*60}\n")
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
 
-        return jsonify({
-            'success': True,
-            'token': VERCEL_BLOB_TOKEN,
-            'uploadUrl': upload_url,
-            'downloadUrl': download_url
-        })
+        headers = {
+            'Authorization': f'Bearer {VERCEL_BLOB_TOKEN}',
+            'Content-Type': 'application/octet-stream'
+        }
+
+        print(f"📡 Uploading {len(file_data)} bytes to Vercel Blob API...")
+        response = requests.post(
+            blob_api_url,
+            headers=headers,
+            data=file_data,
+            timeout=300
+        )
+
+        print(f"📡 Response status: {response.status_code}")
+
+        if response.status_code == 200:
+            response_data = response.json()
+            blob_url = response_data.get('url')
+            print(f"✅ Uploaded to Blob! URL: {blob_url}")
+            return blob_url
+        else:
+            print(f"⚠️  Blob upload returned {response.status_code}: {response.text}")
+            return None
 
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        print(f"⚠️  Blob upload failed: {str(e)}")
+        return None
 
 
 @app.route('/api/transcribe', methods=['POST'])
 @login_required
 def transcribe():
-    """Transcribe audio file (from upload or Blob) and save to database."""
+    """Transcribe audio file and save to database."""
     try:
         print(f"\n{'='*60}")
         print(f"📡 [TRANSCRIBE START] Received request")
         print(f"Content-Length: {request.content_length}")
         print(f"{'='*60}")
 
-        # Check if this is JSON (Blob URL) or FormData (direct file upload)
-        data = request.get_json(silent=True) or request.form
-        name = data.get('name', '').strip()
-        blob_url = data.get('blob_url', '').strip() if request.is_json else ''
+        # Check if file was uploaded
+        if 'file' not in request.files:
+            print("❌ No file in request")
+            return jsonify({'error': 'No file uploaded'}), 400
 
+        file = request.files['file']
+        name = request.form.get('name', '').strip()
+
+        print(f"📝 File name: {file.filename}")
         print(f"📝 Transcription name: {name}")
-        print(f"📝 Blob URL: {blob_url if blob_url else 'N/A (direct upload)'}")
 
         if not name:
             print("❌ No name provided")
             return jsonify({'error': 'Please enter a name for this transcription'}), 400
 
-        temp_path = None
+        if file.filename == '':
+            print("❌ Empty filename")
+            return jsonify({'error': 'No file selected'}), 400
+
+        if not allowed_file(file.filename):
+            print(f"❌ File type not allowed: {file.filename}")
+            return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+
+        print(f"\n{'='*60}")
+        print(f"🎯 Transcribing: {name}")
+        print(f"📁 File: {file.filename}")
+        print(f"{'='*60}")
+
+        # Save temp file
+        filename = secure_filename(file.filename)
+        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
+
+        print(f"💾 Saving file to: {temp_path}")
+        file.save(temp_path)
+        file_size = os.path.getsize(temp_path)
+        print(f"✅ File saved ({file_size / (1024*1024):.2f}MB)")
 
         try:
-            # Handle either Blob URL or direct file upload
-            if blob_url:
-                # Download from Blob
-                print(f"\n{'='*60}")
-                print(f"🎯 Transcribing from Blob: {name}")
-                print(f"📥 Downloading from: {blob_url}")
-                print(f"{'='*60}")
-
-                # Extract filename from URL
-                filename = blob_url.split('/')[-1]
-                temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
-
-                print(f"💾 Downloading to: {temp_path}")
-                urllib.request.urlretrieve(blob_url, temp_path)
-                file_size = os.path.getsize(temp_path)
-                print(f"✅ Downloaded ({file_size / (1024*1024):.2f}MB)")
-
-            else:
-                # Direct file upload
-                if 'file' not in request.files:
-                    print("❌ No file in request and no blob_url provided")
-                    return jsonify({'error': 'No file uploaded'}), 400
-
-                file = request.files['file']
-
-                if file.filename == '':
-                    print("❌ Empty filename")
-                    return jsonify({'error': 'No file selected'}), 400
-
-                if not allowed_file(file.filename):
-                    print(f"❌ File type not allowed: {file.filename}")
-                    return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
-
-                print(f"\n{'='*60}")
-                print(f"🎯 Transcribing: {name}")
-                print(f"📁 File: {file.filename}")
-                print(f"{'='*60}")
-
-                # Save temp file
-                filename = secure_filename(file.filename)
-                temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
-
-                print(f"💾 Saving file to: {temp_path}")
-                file.save(temp_path)
-                file_size = os.path.getsize(temp_path)
-                print(f"✅ File saved ({file_size / (1024*1024):.2f}MB)")
-
             print(f"🔄 Starting transcription with Assembly AI...")
             # Transcribe with Assembly AI (send in native format)
             transcript = transcribe_with_assembly_ai(temp_path)
@@ -458,6 +429,13 @@ def transcribe():
             conn.close()
 
             print(f"✅ Saved to database (ID: {transcription_id})")
+
+            # Try to upload to Vercel Blob for archival (optional)
+            if IS_VERCEL:
+                blob_url = upload_to_vercel_blob(temp_path, filename)
+                if blob_url:
+                    print(f"✅ File also archived in Blob: {blob_url}")
+
             print(f"{'='*60}\n")
 
             return jsonify({
@@ -469,13 +447,12 @@ def transcribe():
 
         finally:
             # Always delete temp file
-            if temp_path:
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except:
-                    pass
-                print("✅ Cleaned up temp file")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+            print("✅ Cleaned up temp file")
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
