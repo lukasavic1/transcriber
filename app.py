@@ -1,16 +1,14 @@
 import os
-import tempfile
+import time
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory, redirect, url_for
 from flask_cors import CORS
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from dotenv import load_dotenv
-from openai import OpenAI
-import yt_dlp
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
+import requests
 
 load_dotenv()
 
@@ -23,15 +21,15 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-
+ASSEMBLY_AI_API_KEY = os.getenv('ASSEMBLY_AI_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
-AUDIO_DIR = Path(tempfile.gettempdir()) / 'transcribe_audio'
-AUDIO_DIR.mkdir(exist_ok=True)
 
 # Admin credentials
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD_HASH = generate_password_hash('Tesla123#')
+
+# Assembly AI API endpoints
+ASSEMBLY_AI_BASE_URL = 'https://api.assemblyai.com/v2'
 
 
 class User(UserMixin):
@@ -75,64 +73,68 @@ def init_db():
         print(f"❌ Database init error: {e}")
 
 
-def extract_audio_from_youtube(youtube_url: str) -> str:
-    """Download audio from YouTube video and return path to MP3 file."""
+def transcribe_with_assembly_ai(youtube_url: str) -> str:
+    """Transcribe YouTube video using Assembly AI."""
     try:
-        ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'outtmpl': str(AUDIO_DIR / '%(id)s'),
-            'quiet': False,
-            'no_warnings': False,
-            'socket_timeout': 60,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Referer': 'https://www.youtube.com/',
-            },
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['web'],
-                    'player_skip': ['js', 'configs'],
-                }
-            },
-            'retries': 10,
-            'fragment_retries': 10,
-            'skip_unavailable_fragments': True,
-            'quiet': True,
-            'no_warnings': True,
-            'noplaylist': True,
+        # Submit transcription job
+        headers = {
+            'Authorization': ASSEMBLY_AI_API_KEY,
+            'Content-Type': 'application/json'
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(youtube_url, download=True)
-            audio_file = AUDIO_DIR / f"{info['id']}.mp3"
+        data = {
+            'audio_url': youtube_url
+        }
 
-            if not audio_file.exists():
-                raise FileNotFoundError(f"Audio file not created")
+        print(f"📤 Submitting transcription request for: {youtube_url}")
+        response = requests.post(
+            f'{ASSEMBLY_AI_BASE_URL}/transcript',
+            json=data,
+            headers=headers,
+            timeout=30
+        )
 
-            return str(audio_file)
-    except Exception as e:
-        raise Exception(f"Failed to download audio: {str(e)}")
+        if response.status_code != 200:
+            raise Exception(f"Assembly AI submission failed: {response.text}")
 
+        transcript_id = response.json()['id']
+        print(f"✅ Transcription job submitted: {transcript_id}")
 
-def transcribe_audio(audio_path: str) -> str:
-    """Transcribe audio file using OpenAI Whisper API."""
-    try:
-        with open(audio_path, 'rb') as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language="en"
+        # Poll for completion
+        print("⏳ Waiting for transcription to complete...")
+        max_attempts = 120  # 10 minutes with 5-second intervals
+        attempt = 0
+
+        while attempt < max_attempts:
+            result_response = requests.get(
+                f'{ASSEMBLY_AI_BASE_URL}/transcript/{transcript_id}',
+                headers=headers,
+                timeout=30
             )
-        return transcript.text
+
+            if result_response.status_code != 200:
+                raise Exception(f"Failed to check transcription status: {result_response.text}")
+
+            result = result_response.json()
+
+            if result['status'] == 'completed':
+                print("✅ Transcription completed!")
+                return result.get('text', '')
+
+            elif result['status'] == 'error':
+                raise Exception(f"Transcription failed: {result.get('error', 'Unknown error')}")
+
+            # Still processing, wait and retry
+            attempt += 1
+            if attempt % 10 == 0:  # Log every 50 seconds
+                print(f"⏳ Still processing... ({attempt * 5} seconds elapsed)")
+
+            time.sleep(5)
+
+        raise Exception("Transcription timed out after 10 minutes")
+
     except Exception as e:
-        raise Exception(f"Transcription failed: {str(e)}")
+        raise Exception(f"Failed to transcribe: {str(e)}")
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -208,11 +210,8 @@ def transcribe():
         if 'youtube.com' not in youtube_url and 'youtu.be' not in youtube_url:
             return jsonify({'error': 'Invalid YouTube URL'}), 400
 
-        # Extract audio
-        audio_path = extract_audio_from_youtube(youtube_url)
-
-        # Transcribe
-        transcript = transcribe_audio(audio_path)
+        # Transcribe with Assembly AI
+        transcript = transcribe_with_assembly_ai(youtube_url)
 
         # Save to database
         conn = get_db()
@@ -222,12 +221,6 @@ def transcribe():
         transcription_id = c.fetchone()[0]
         conn.commit()
         conn.close()
-
-        # Clean up
-        try:
-            Path(audio_path).unlink()
-        except:
-            pass
 
         return jsonify({
             'success': True,
