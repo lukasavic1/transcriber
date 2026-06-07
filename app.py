@@ -76,10 +76,13 @@ def init_db():
         print(f"❌ Database init error: {e}")
 
 
-def get_audio_url_from_youtube(youtube_url: str) -> str:
-    """Extract audio stream URL from YouTube using yt-dlp."""
+def download_audio_from_youtube(youtube_url: str) -> str:
+    """Download audio from YouTube using yt-dlp and return file path."""
     try:
-        print(f"🎬 Extracting audio URL from YouTube...")
+        print(f"🎬 Downloading audio from YouTube...")
+
+        audio_dir = Path(tempfile.gettempdir()) / 'transcribe_audio'
+        audio_dir.mkdir(exist_ok=True)
 
         # Try multiple times with different configurations
         configs = [
@@ -97,7 +100,6 @@ def get_audio_url_from_youtube(youtube_url: str) -> str:
             },
         ]
 
-        audio_url = None
         last_error = None
 
         for config in configs:
@@ -109,6 +111,12 @@ def get_audio_url_from_youtube(youtube_url: str) -> str:
                     'quiet': False,
                     'no_warnings': False,
                     'socket_timeout': 60,
+                    'outtmpl': str(audio_dir / '%(id)s'),
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }],
                     'http_headers': {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                         'Accept-Language': 'en-US,en;q=0.9',
@@ -130,54 +138,57 @@ def get_audio_url_from_youtube(youtube_url: str) -> str:
                 }
 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=False)
+                    info = ydl.extract_info(youtube_url, download=True)
+                    video_id = info['id']
+                    audio_file = audio_dir / f"{video_id}.mp3"
 
-                    # Get the audio URL
-                    if 'url' in info:
-                        audio_url = info['url']
-                        print(f"✅ Got audio URL with {config['name']}!")
-                        break
-                    elif 'formats' in info and len(info['formats']) > 0:
-                        for fmt in info['formats']:
-                            if fmt.get('vcodec') == 'none' and fmt.get('acodec') != 'none':
-                                if 'url' in fmt:
-                                    audio_url = fmt['url']
-                                    print(f"✅ Got audio URL with {config['name']}!")
-                                    break
-                        if audio_url:
-                            break
+                    if audio_file.exists():
+                        print(f"✅ Downloaded with {config['name']}! ({audio_file.stat().st_size} bytes)")
+                        return str(audio_file)
 
             except Exception as e:
                 last_error = str(e)
                 print(f"⚠️  {config['name']} failed: {last_error}")
                 continue
 
-        if audio_url:
-            print(f"✅ Got audio URL! ({len(audio_url)} chars)")
-            return audio_url
-        else:
-            error_msg = last_error or "Could not extract audio URL"
-            raise Exception(error_msg)
+        error_msg = last_error or "Could not download audio"
+        raise Exception(error_msg)
 
     except Exception as e:
-        raise Exception(f"Failed to extract audio URL: {str(e)}")
+        raise Exception(f"Failed to download audio: {str(e)}")
 
 
-def transcribe_with_assembly_ai(audio_url: str) -> str:
-    """Transcribe audio URL using Assembly AI."""
+def transcribe_with_assembly_ai(audio_file_path: str) -> str:
+    """Transcribe audio file using Assembly AI."""
     try:
-        print(f"📤 Submitting to Assembly AI...")
+        print(f"📤 Uploading to Assembly AI...")
 
+        # Upload file to Assembly AI
         headers = {
             'Authorization': ASSEMBLY_AI_API_KEY,
-            'Content-Type': 'application/json'
         }
 
+        with open(audio_file_path, 'rb') as f:
+            files = {'file': (Path(audio_file_path).name, f, 'audio/mpeg')}
+            upload_response = requests.post(
+                f'{ASSEMBLY_AI_BASE_URL}/upload',
+                headers=headers,
+                files=files,
+                timeout=60
+            )
+
+        if upload_response.status_code != 200:
+            raise Exception(f"Upload failed: {upload_response.text}")
+
+        audio_url = upload_response.json()['upload_url']
+        print(f"✅ Uploaded! Starting transcription...")
+
+        # Submit transcription job
+        headers['Content-Type'] = 'application/json'
         data = {
             'audio_url': audio_url
         }
 
-        # Submit transcription job
         response = requests.post(
             f'{ASSEMBLY_AI_BASE_URL}/transcript',
             json=data,
@@ -304,11 +315,19 @@ def transcribe():
         print(f"🎯 Transcribing: {name}")
         print(f"{'='*60}")
 
-        # Step 1: Extract audio URL with yt-dlp
-        audio_url = get_audio_url_from_youtube(youtube_url)
+        # Step 1: Download audio with yt-dlp
+        audio_file = download_audio_from_youtube(youtube_url)
 
-        # Step 2: Transcribe with Assembly AI
-        transcript = transcribe_with_assembly_ai(audio_url)
+        try:
+            # Step 2: Transcribe with Assembly AI
+            transcript = transcribe_with_assembly_ai(audio_file)
+        finally:
+            # Clean up
+            try:
+                os.remove(audio_file)
+                print("✅ Cleaned up temp file")
+            except:
+                pass
 
         # Step 3: Save to database
         conn = get_db()
