@@ -20,7 +20,7 @@ app.secret_key = os.getenv('SECRET_KEY', 'change-this-in-production-12345')
 
 # File upload config
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'mp4', 'm4a', 'webm', 'flac', 'ogg', 'aac'}
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB (Vercel friendly)
 UPLOAD_FOLDER = tempfile.gettempdir()
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
@@ -354,6 +354,11 @@ def delete_transcription(transcription_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.errorhandler(413)
+def request_too_large(e):
+    return jsonify({'error': f'File too large. Max size: 25MB'}), 413
+
+
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({'error': 'Endpoint not found'}), 404
@@ -361,7 +366,13 @@ def not_found(e):
 
 @app.errorhandler(500)
 def server_error(e):
+    print(f"Server error: {str(e)}")
     return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.before_request
+def log_request():
+    print(f"Request: {request.method} {request.path}")
 
 
 if __name__ == '__main__':
