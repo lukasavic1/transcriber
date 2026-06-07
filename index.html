@@ -574,7 +574,6 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/@vercel/blob@0.21.1/dist/index.min.js"></script>
     <script>
         const API_BASE = '/api';
         const IS_VERCEL = window.location.hostname.includes('vercel.app');
@@ -755,7 +754,7 @@
         }
 
         async function uploadToBlob(file) {
-            // Upload file directly to Vercel Blob
+            // Upload file directly to Vercel Blob using REST API
             try {
                 const fileSizeMB = (file.size / (1024*1024)).toFixed(2);
                 console.log(`[CLIENT] Uploading ${file.name} (${fileSizeMB}MB) to Vercel Blob...`);
@@ -774,21 +773,38 @@
                 }
 
                 const { token } = await tokenResponse.json();
-                console.log(`[CLIENT] Got Blob token`);
+                console.log(`[CLIENT] Got Blob token, uploading...`);
 
-                // Upload to Vercel Blob using the library
+                // Create unique filename
+                const timestamp = Date.now();
+                const blobFilename = `uploads/${timestamp}-${file.name}`;
+
+                // Upload to Vercel Blob REST API
                 showStatus(`Uploading to Vercel Blob (${fileSizeMB}MB)...`);
-                const blob = await VercelBlob.put(file.name, file, {
-                    access: 'public',
-                    token: token,
-                    onUploadProgress: (progress) => {
-                        const percent = Math.round(progress.loaded / progress.total * 100);
-                        showStatus(`Uploading to Vercel Blob (${percent}%)...`);
-                    }
+
+                const uploadUrl = `https://blob.vercelusercontent.com?filename=${encodeURIComponent(blobFilename)}`;
+
+                const uploadResponse = await fetch(uploadUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': file.type || 'application/octet-stream'
+                    },
+                    body: file
                 });
 
-                console.log(`[CLIENT] Blob upload complete: ${blob.url}`);
-                return blob.url;
+                if (!uploadResponse.ok) {
+                    console.error(`[CLIENT] Upload response:`, uploadResponse.status, uploadResponse.statusText);
+                    const text = await uploadResponse.text();
+                    console.error(`[CLIENT] Response body:`, text);
+                    throw new Error(`Blob upload failed: ${uploadResponse.statusText}`);
+                }
+
+                const result = await uploadResponse.json();
+                const blobUrl = result.url;
+
+                console.log(`[CLIENT] Blob upload complete: ${blobUrl}`);
+                return blobUrl;
 
             } catch (error) {
                 console.error('[CLIENT] Blob upload error:', error);
