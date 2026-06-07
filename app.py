@@ -156,13 +156,18 @@ def transcribe_with_assembly_ai(audio_file_path: str) -> str:
         mime_type = mime_types.get(file_ext, 'audio/mpeg')
 
         with open(audio_file_path, 'rb') as f:
-            files = {'file': (Path(audio_file_path).name, f, mime_type)}
-            upload_response = requests.post(
-                f'{ASSEMBLY_AI_BASE_URL}/upload',
-                headers=headers,
-                files=files,
-                timeout=60
-            )
+            file_data = f.read()
+
+        # Set Content-Type header explicitly
+        upload_headers = headers.copy()
+        upload_headers['Content-Type'] = mime_type
+
+        upload_response = requests.post(
+            f'{ASSEMBLY_AI_BASE_URL}/upload',
+            headers=upload_headers,
+            data=file_data,
+            timeout=60
+        )
 
         if upload_response.status_code != 200:
             raise Exception(f"Upload failed: {upload_response.text}")
@@ -311,11 +316,8 @@ def transcribe():
         file.save(temp_path)
 
         try:
-            # Convert to WAV for better compatibility
-            wav_path = convert_to_wav(temp_path)
-
-            # Transcribe with Assembly AI
-            transcript = transcribe_with_assembly_ai(wav_path)
+            # Transcribe with Assembly AI (send in native format)
+            transcript = transcribe_with_assembly_ai(temp_path)
 
             # Save to database
             conn = get_db()
@@ -337,14 +339,13 @@ def transcribe():
             })
 
         finally:
-            # Always delete temp files
-            for path in [temp_path, temp_path.replace(Path(temp_path).suffix, '.wav')]:
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except:
-                    pass
-            print("✅ Cleaned up temp files")
+            # Always delete temp file
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except:
+                pass
+            print("✅ Cleaned up temp file")
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
