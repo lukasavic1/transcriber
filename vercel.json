@@ -1,11 +1,5 @@
 {
-  "buildCommand": "bash build.sh",
-  "functions": {
-    "api/index.py": {
-      "memory": 2048,
-      "maxDuration": 300
-    }
-  },
+  "buildCommand": "pip install -r requirements.txt",
   "env": {
     "PYTHONUNBUFFERED": "1"
   }
