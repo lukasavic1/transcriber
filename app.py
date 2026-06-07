@@ -8,14 +8,15 @@ from flask_login import LoginManager, UserMixin, login_user, logout_user, login_
 from dotenv import load_dotenv
 from openai import OpenAI
 import yt_dlp
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app, supports_credentials=True)
-app.secret_key = os.getenv('SECRET_KEY', 'your-secret-key-change-in-production')
+app.secret_key = os.getenv('SECRET_KEY', 'change-this-in-production-12345')
 
 # Initialize Flask-Login
 login_manager = LoginManager()
@@ -24,12 +25,11 @@ login_manager.login_view = 'login'
 
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
+DATABASE_URL = os.getenv('DATABASE_URL')
 AUDIO_DIR = Path(tempfile.gettempdir()) / 'transcribe_audio'
 AUDIO_DIR.mkdir(exist_ok=True)
 
-DB_PATH = 'transcriptions.db'
-
-# Hardcoded admin credentials (in production, use environment variables)
+# Admin credentials
 ADMIN_USERNAME = 'admin'
 ADMIN_PASSWORD_HASH = generate_password_hash('Tesla123#')
 
@@ -49,25 +49,30 @@ def load_user(username):
     return None
 
 
-def init_db():
-    """Initialize the database."""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS transcriptions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  name TEXT NOT NULL,
-                  youtube_url TEXT NOT NULL,
-                  transcript TEXT NOT NULL,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    conn.close()
-
-
 def get_db():
     """Get database connection."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL environment variable not set")
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
+
+
+def init_db():
+    """Initialize the database."""
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS transcriptions
+                     (id SERIAL PRIMARY KEY,
+                      name TEXT NOT NULL,
+                      youtube_url TEXT NOT NULL,
+                      transcript TEXT NOT NULL,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"❌ Database init error: {e}")
 
 
 def extract_audio_from_youtube(youtube_url: str) -> str:
@@ -146,7 +151,6 @@ def login():
                 return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
             return redirect(url_for('login'))
 
-    # If GET request, serve login page
     return send_from_directory('.', 'login.html')
 
 
@@ -206,10 +210,10 @@ def transcribe():
         # Save to database
         conn = get_db()
         c = conn.cursor()
-        c.execute('INSERT INTO transcriptions (name, youtube_url, transcript) VALUES (?, ?, ?)',
+        c.execute('INSERT INTO transcriptions (name, youtube_url, transcript) VALUES (%s, %s, %s) RETURNING id',
                   (name, youtube_url, transcript))
+        transcription_id = c.fetchone()[0]
         conn.commit()
-        transcription_id = c.lastrowid
         conn.close()
 
         # Clean up
@@ -245,10 +249,10 @@ def get_transcriptions():
         conn.close()
 
         transcriptions = [{
-            'id': row['id'],
-            'name': row['name'],
-            'youtube_url': row['youtube_url'],
-            'created_at': row['created_at']
+            'id': row[0],
+            'name': row[1],
+            'youtube_url': row[2],
+            'created_at': row[3].isoformat() if row[3] else None
         } for row in rows]
 
         return jsonify({'transcriptions': transcriptions})
@@ -263,7 +267,8 @@ def get_transcription(transcription_id):
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute('SELECT * FROM transcriptions WHERE id = ?', (transcription_id,))
+        c.execute('SELECT id, name, youtube_url, transcript, created_at FROM transcriptions WHERE id = %s',
+                  (transcription_id,))
         row = c.fetchone()
         conn.close()
 
@@ -271,11 +276,11 @@ def get_transcription(transcription_id):
             return jsonify({'error': 'Transcription not found'}), 404
 
         return jsonify({
-            'id': row['id'],
-            'name': row['name'],
-            'youtube_url': row['youtube_url'],
-            'transcript': row['transcript'],
-            'created_at': row['created_at']
+            'id': row[0],
+            'name': row[1],
+            'youtube_url': row[2],
+            'transcript': row[3],
+            'created_at': row[4].isoformat() if row[4] else None
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -288,7 +293,7 @@ def delete_transcription(transcription_id):
     try:
         conn = get_db()
         c = conn.cursor()
-        c.execute('DELETE FROM transcriptions WHERE id = ?', (transcription_id,))
+        c.execute('DELETE FROM transcriptions WHERE id = %s', (transcription_id,))
         conn.commit()
         conn.close()
 
