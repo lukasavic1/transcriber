@@ -530,7 +530,7 @@
                     <div class="upload-area" id="uploadArea">
                         <div class="upload-icon">📁</div>
                         <div class="upload-text">Click to upload or drag and drop</div>
-                        <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 10MB)</div>
+                        <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 5TB with Blob)</div>
                     </div>
                     <input type="file" id="fileInput" accept=".mp3,.mp4,.wav,.m4a,.webm,.flac,.ogg,.aac" style="display: none;">
 
@@ -576,6 +576,8 @@
 
     <script>
         const API_BASE = '/api';
+        const IS_VERCEL = window.location.hostname.includes('vercel.app');
+        const BLOB_UPLOAD_THRESHOLD = 4.5 * 1024 * 1024; // 4.5MB - Vercel serverless limit
 
         // DOM Elements
         const uploadArea = document.getElementById('uploadArea');
@@ -599,6 +601,7 @@
 
         let currentTranscriptionId = null;
         let selectedFile = null;
+        let blobUrl = null; // URL from Vercel Blob
 
         // Load user info
         async function loadUserInfo() {
@@ -685,7 +688,7 @@
             uploadArea.innerHTML = `
                 <div class="upload-icon">📁</div>
                 <div class="upload-text">Click to upload or drag and drop</div>
-                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 10MB)</div>
+                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 5TB with Blob)</div>
             `;
             fileInput.value = '';
             hideStatus();
@@ -759,6 +762,54 @@
             }
         }
 
+        async function uploadToVercelBlob(file) {
+            // Upload file directly to Vercel Blob and return the URL
+            try {
+                console.log(`[CLIENT] Uploading ${file.name} to Vercel Blob...`);
+                showStatus(`Uploading to Blob storage (${(file.size / (1024 * 1024)).toFixed(2)}MB)...`);
+
+                // Get upload metadata from the backend (token, filename, etc)
+                const metadataResponse = await fetch(`${API_BASE}/blob-upload-token`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filename: file.name,
+                        size: file.size
+                    })
+                });
+
+                if (!metadataResponse.ok) {
+                    const data = await metadataResponse.json();
+                    throw new Error(`Failed to get upload token: ${data.error}`);
+                }
+
+                const { token, uploadUrl, downloadUrl } = await metadataResponse.json();
+                console.log(`[CLIENT] Got upload token, uploading file to: ${uploadUrl}`);
+
+                // Upload directly to Vercel Blob
+                const uploadResponse = await fetch(uploadUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': file.type || 'application/octet-stream'
+                    },
+                    body: file
+                });
+
+                if (!uploadResponse.ok) {
+                    console.error(`[CLIENT] Blob upload response:`, uploadResponse.status, uploadResponse.statusText);
+                    throw new Error(`Blob upload failed: ${uploadResponse.statusText}`);
+                }
+
+                console.log(`[CLIENT] Blob upload complete: ${downloadUrl}`);
+                return downloadUrl;
+            } catch (error) {
+                console.error('[CLIENT] Blob upload error:', error);
+                throw error;
+            }
+        }
+
         async function transcribe() {
             if (!selectedFile) {
                 showStatus('Please select a file', 'error');
@@ -770,23 +821,48 @@
                 return;
             }
 
-            const formData = new FormData();
-            formData.append('file', selectedFile);
-            formData.append('name', transcriptionName.value.trim());
-
             transcribeBtn.disabled = true;
             const fileSizeMB = (selectedFile.size / (1024 * 1024)).toFixed(2);
             console.log(`[CLIENT] Starting transcription of ${selectedFile.name} (${fileSizeMB}MB)`);
-            showStatus('Uploading and transcribing...');
 
             try {
+                // If file is large and on Vercel, upload to Blob first
+                let uploadUrl = null;
+                if (IS_VERCEL && selectedFile.size > BLOB_UPLOAD_THRESHOLD) {
+                    console.log(`[CLIENT] File is ${fileSizeMB}MB - using Vercel Blob`);
+                    uploadUrl = await uploadToVercelBlob(selectedFile);
+                }
+
+                showStatus('Transcribing with Assembly AI...');
                 console.log(`[CLIENT] Sending POST request to ${API_BASE}/transcribe`);
                 const startTime = Date.now();
+
+                const transcribeData = {
+                    name: transcriptionName.value.trim()
+                };
+
+                // If we have a blob URL, use it; otherwise send file directly
+                let requestBody;
+                let requestHeaders = {
+                    'Content-Type': 'application/json'
+                };
+
+                if (uploadUrl) {
+                    transcribeData.blob_url = uploadUrl;
+                    requestBody = JSON.stringify(transcribeData);
+                } else {
+                    const formData = new FormData();
+                    formData.append('file', selectedFile);
+                    formData.append('name', transcribeData.name);
+                    requestBody = formData;
+                    requestHeaders = {};
+                }
 
                 const response = await fetch(`${API_BASE}/transcribe`, {
                     method: 'POST',
                     credentials: 'include',
-                    body: formData
+                    headers: requestHeaders,
+                    body: requestBody
                 });
 
                 const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -828,7 +904,7 @@
             uploadArea.innerHTML = `
                 <div class="upload-icon">📁</div>
                 <div class="upload-text">Click to upload or drag and drop</div>
-                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 10MB)</div>
+                <div class="upload-subtext">MP3, MP4, WAV, M4A, WebM, FLAC, OGG (Local: 500MB | Vercel: 5TB with Blob)</div>
             `;
             fileInput.value = '';
             hideStatus();

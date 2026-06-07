@@ -12,6 +12,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import requests
 import subprocess
+import urllib.request
 
 load_dotenv()
 
@@ -34,6 +35,8 @@ login_manager.login_view = 'login'
 
 ASSEMBLY_AI_API_KEY = os.getenv('ASSEMBLY_AI_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
+VERCEL_BLOB_TOKEN = os.getenv('VERCEL_BLOB_READ_WRITE_TOKEN')
+IS_VERCEL = os.getenv('VERCEL') == '1'
 
 # Admin credentials
 ADMIN_USERNAME = 'admin'
@@ -41,6 +44,9 @@ ADMIN_PASSWORD_HASH = generate_password_hash('Tesla123#')
 
 # Assembly AI API endpoints
 ASSEMBLY_AI_BASE_URL = 'https://api.assemblyai.com/v2'
+
+# Vercel Blob API endpoint
+VERCEL_BLOB_BASE_URL = 'https://blob.vercelusercontent.com'
 
 
 class User(UserMixin):
@@ -298,7 +304,8 @@ def health():
     return jsonify({
         'status': 'ok',
         'max_file_size_mb': MAX_FILE_SIZE / (1024 * 1024),
-        'environment': 'vercel' if IS_VERCEL else 'local'
+        'environment': 'vercel' if IS_VERCEL else 'local',
+        'blob_storage_configured': bool(VERCEL_BLOB_TOKEN)
     })
 
 
@@ -309,54 +316,134 @@ def get_user():
     return jsonify({'username': current_user.username})
 
 
+@app.route('/api/blob-upload-token', methods=['POST'])
+@login_required
+def blob_upload_token():
+    """Generate upload token and URL for direct Blob upload from frontend."""
+    try:
+        print(f"\n{'='*60}")
+        print(f"📋 [BLOB] Generating upload token...")
+        print(f"{'='*60}")
+
+        if not VERCEL_BLOB_TOKEN:
+            print("❌ VERCEL_BLOB_READ_WRITE_TOKEN not configured")
+            return jsonify({'error': 'Blob storage not configured'}), 500
+
+        data = request.get_json()
+        filename = data.get('filename', '').strip()
+        file_size = data.get('size', 0)
+
+        if not filename:
+            print("❌ No filename provided")
+            return jsonify({'error': 'Filename required'}), 400
+
+        if not allowed_file(filename):
+            print(f"❌ File type not allowed: {filename}")
+            return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+
+        print(f"📝 Filename: {filename}")
+        print(f"📊 Size: {file_size / (1024*1024):.2f}MB")
+
+        # Generate a unique filename for storage
+        storage_filename = f"{int(time.time())}_{secure_filename(filename)}"
+
+        # Vercel Blob upload endpoint
+        # Frontend will upload directly to this URL with Bearer token
+        upload_url = f"https://blob.vercelusercontent.com?filename={storage_filename}"
+        download_url = f"https://blob.vercelusercontent.com/{storage_filename}"
+
+        print(f"📤 Upload URL: {upload_url}")
+        print(f"📥 Download URL: {download_url}")
+        print(f"✅ Upload token generated")
+        print(f"{'='*60}\n")
+
+        return jsonify({
+            'success': True,
+            'token': VERCEL_BLOB_TOKEN,
+            'uploadUrl': upload_url,
+            'downloadUrl': download_url
+        })
+
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @app.route('/api/transcribe', methods=['POST'])
 @login_required
 def transcribe():
-    """Transcribe uploaded audio file and save to database."""
+    """Transcribe audio file (from upload or Blob) and save to database."""
     try:
         print(f"\n{'='*60}")
         print(f"📡 [TRANSCRIBE START] Received request")
         print(f"Content-Length: {request.content_length}")
         print(f"{'='*60}")
 
-        # Check if file was uploaded
-        if 'file' not in request.files:
-            print("❌ No file in request")
-            return jsonify({'error': 'No file uploaded'}), 400
+        # Check if this is JSON (Blob URL) or FormData (direct file upload)
+        data = request.get_json(silent=True) or request.form
+        name = data.get('name', '').strip()
+        blob_url = data.get('blob_url', '').strip() if request.is_json else ''
 
-        file = request.files['file']
-        name = request.form.get('name', '').strip()
-
-        print(f"📝 File name: {file.filename}")
         print(f"📝 Transcription name: {name}")
+        print(f"📝 Blob URL: {blob_url if blob_url else 'N/A (direct upload)'}")
 
         if not name:
             print("❌ No name provided")
             return jsonify({'error': 'Please enter a name for this transcription'}), 400
 
-        if file.filename == '':
-            print("❌ Empty filename")
-            return jsonify({'error': 'No file selected'}), 400
-
-        if not allowed_file(file.filename):
-            print(f"❌ File type not allowed: {file.filename}")
-            return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
-
-        print(f"\n{'='*60}")
-        print(f"🎯 Transcribing: {name}")
-        print(f"📁 File: {file.filename}")
-        print(f"{'='*60}")
-
-        # Save temp file
-        filename = secure_filename(file.filename)
-        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
-
-        print(f"💾 Saving file to: {temp_path}")
-        file.save(temp_path)
-        file_size = os.path.getsize(temp_path)
-        print(f"✅ File saved ({file_size / (1024*1024):.2f}MB)")
+        temp_path = None
 
         try:
+            # Handle either Blob URL or direct file upload
+            if blob_url:
+                # Download from Blob
+                print(f"\n{'='*60}")
+                print(f"🎯 Transcribing from Blob: {name}")
+                print(f"📥 Downloading from: {blob_url}")
+                print(f"{'='*60}")
+
+                # Extract filename from URL
+                filename = blob_url.split('/')[-1]
+                temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
+
+                print(f"💾 Downloading to: {temp_path}")
+                urllib.request.urlretrieve(blob_url, temp_path)
+                file_size = os.path.getsize(temp_path)
+                print(f"✅ Downloaded ({file_size / (1024*1024):.2f}MB)")
+
+            else:
+                # Direct file upload
+                if 'file' not in request.files:
+                    print("❌ No file in request and no blob_url provided")
+                    return jsonify({'error': 'No file uploaded'}), 400
+
+                file = request.files['file']
+
+                if file.filename == '':
+                    print("❌ Empty filename")
+                    return jsonify({'error': 'No file selected'}), 400
+
+                if not allowed_file(file.filename):
+                    print(f"❌ File type not allowed: {file.filename}")
+                    return jsonify({'error': f'File type not supported. Allowed: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+
+                print(f"\n{'='*60}")
+                print(f"🎯 Transcribing: {name}")
+                print(f"📁 File: {file.filename}")
+                print(f"{'='*60}")
+
+                # Save temp file
+                filename = secure_filename(file.filename)
+                temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{int(time.time())}_{filename}")
+
+                print(f"💾 Saving file to: {temp_path}")
+                file.save(temp_path)
+                file_size = os.path.getsize(temp_path)
+                print(f"✅ File saved ({file_size / (1024*1024):.2f}MB)")
+
             print(f"🔄 Starting transcription with Assembly AI...")
             # Transcribe with Assembly AI (send in native format)
             transcript = transcribe_with_assembly_ai(temp_path)
@@ -382,12 +469,13 @@ def transcribe():
 
         finally:
             # Always delete temp file
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except:
-                pass
-            print("✅ Cleaned up temp file")
+            if temp_path:
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except:
+                    pass
+                print("✅ Cleaned up temp file")
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
